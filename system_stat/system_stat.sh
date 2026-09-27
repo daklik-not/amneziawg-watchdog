@@ -6,55 +6,57 @@ source ./mem_stat.sh
 source ./net_stat.sh
 source ./disk_stat.sh
 source ./proc_stat.sh
-# METRICS — подмножество FORMAT: только то, что реально мониторится и алертит.
-# UPDATE_TIME/COOLDOWN валидируются через FORMAT, но не участвуют в read_information/alert.
+# METRICS — a subset of FORMAT: only what is actually monitored and alerted on.
+# UPDATE_TIME/COOLDOWN are validated via FORMAT but do not participate in read_information/alert.
 
 function show_help {
 	cat <<EOF
-system_stat — сбор метрик и алертов для AmneziaWG (целевой хост: 1 vCPU / 1 GB RAM / 10 GB).
+system_stat — metrics collection and alerting for AmneziaWG (target host: 1 vCPU / 1 GB RAM / 10 GB).
 
-ИСПОЛЬЗОВАНИЕ
+USAGE
     system_stat.sh -vi <iface> [--once]
 
-    Обычно скрипт запускается не напрямую, а через rebuild.sh, который
-    собирает образ и передаёт ему аргументы и переменные окружения:
+    The script is normally not run directly, but via rebuild.sh, which
+    builds the image and passes it arguments and environment variables:
 
         ./rebuild.sh -vi amn0
         ./rebuild.sh -vi amn0 --once
         ./rebuild.sh -- --help
 
-ОПЦИИ
-    -vi, --vpn-int <iface>   Обязательно. VPN-интерфейс для чтения NET_* метрик,
-                             например amn0 или wg0. Смотрите: ip -br link.
-    -o,  --once              Один снимок всех метрик в stdout, без алертов
-                             в Telegram, без ухода в бесконечный цикл. Выход 0.
-                             Первый проход инициализирует counter-метрики, второй
-                             (через UPDATE_TIME секунд) даёт реальные значения.
-    -h,  --help              Показать эту справку и выйти. Не требует -vi
-                             и не проверяет наличие VPN-процесса.
+OPTIONS
+    -vi, --vpn-int <iface>   Required. VPN interface used to read the NET_* metrics,
+                             e.g. amn0 or wg0. See: ip -br link.
+    -o,  --once              A single snapshot of all metrics to stdout, without
+                             Telegram alerts and without entering the endless loop. Exit 0.
+                             The first pass initializes the counter metrics, the second
+                             (after UPDATE_TIME seconds) yields real values.
+    -h,  --help              Show this help and exit. Does not require -vi
+                             and does not check for the VPN process.
+	-t,  --telegram          Enables Telegram alerts. Requires a configured token;
+							 the script will not terminate, alerts simply won't reach Telegram
+							
+ENVIRONMENT (passed to the container via docker run -e)
+    ROOT_PATH    Root of the mounted host filesystem. In the container: /host.
+                 Used by the DISK_ROOT_PCT, DISK_INODE_PCT,
+                 DISK_IO_UTIL_PCT metrics. When run directly without ROOT_PATH,
+                 the current / is used.
+    BOT_TOKEN    Telegram bot token. Without it alerts go nowhere —
+                 the script still runs, but sendMessage returns an error.
+    CHAT_ID      Chat/channel ID for alerts.
 
-ОКРУЖЕНИЕ (прокидывается контейнеру через docker run -e)
-    ROOT_PATH    Корень монтируемой ФС хоста. В контейнере: /host.
-                 Используется метриками DISK_ROOT_PCT, DISK_INODE_PCT,
-                 DISK_IO_UTIL_PCT. При прямом запуске без ROOT_PATH
-                 берётся текущий /.
-    BOT_TOKEN    Токен Telegram-бота. Без него алерты уходят в никуда —
-                 скрипт отработает, но sendMessage вернёт ошибку.
-    CHAT_ID      ID чата/канала для алертов.
+EXIT CODES
+    0           normal completion, --help, --once
+    1           argument error, missing VPN process, or invalid
+                values in OPTIONS (see validate_fields)
 
-КОДЫ ВЫХОДА
-    0           нормальное завершение, --help, --once
-    1           ошибка аргументов, отсутствует VPN-процесс или невалидные
-                значения в OPTIONS (см. validate_fields)
-
-ПРИМЕЧАНИЯ
-    - Скрипт работает в двух режимах: userspace (процесс amnezia найден
-      через pgrep, метрики AWG_* добавляются автоматически) и kernel
-      (модуль amneziawg в /proc/modules, AWG_* не собираются).
-    - Пороги алертов и интервал опроса задаются в metrics_conf.sh
-      (массив OPTIONS). Там же — комментарии по каждой метрике.
-    - Cooldown между повторными алертами по одной метрике —
-      OPTIONS[COOLDOWN], по умолчанию ${OPTIONS[COOLDOWN]} s.
+NOTES
+    - The script runs in two modes: userspace (the amnezia process is found
+      via pgrep, AWG_* metrics are added automatically) and kernel
+      (the amneziawg module is in /proc/modules, AWG_* are not collected).
+    - Alert thresholds and the polling interval are set in metrics_conf.sh
+      (the OPTIONS array). Per-metric comments are there as well.
+    - Cooldown between repeated alerts for the same metric —
+      OPTIONS[COOLDOWN], default ${OPTIONS[COOLDOWN]} s.
 EOF
 }
 
@@ -71,10 +73,10 @@ function once {
 	local interval="${OPTIONS[UPDATE_TIME]}"
 	(( interval < 1 )) && interval=1
 
-	# Первый проход — инициализирует PREVIOUS_VALUES для counter-метрик.
+	# First pass — initializes PREVIOUS_VALUES for the counter metrics.
 	read_metrics_silent
 	sleep "$interval"
-	# Второй проход — реальные значения и rate.
+	# Second pass — real values and rate.
 	read_metrics_silent
 
 	printf '\n=== system_stat snapshot  %s ===\n' "$(date '+%H:%M:%S | %d.%m.%Y')"
@@ -113,7 +115,7 @@ function read_information {
 		get_func="get_${metric}_inf"
 		#echo "$metric" >&2
 		if ! "$get_func"; then 
-			echo "Couldn't read the metric $metric" >&2
+				echo "could not read metric $metric" >&2
 			continue
 		fi
 		check_value_ge_thr "$metric" 
@@ -133,19 +135,21 @@ function echo_to_telegram {
 		"https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
 		-d chat_id="${CHAT_ID}" \
 		-d parse_mode="Markdown" \
-		-d text="${MESSAGE}" "text=$MESSAGE" >/dev/null
+		-d text="${MESSAGE}" >/dev/null
 }
 
 function alert {
 	local metric_name="$1" 
 	local time time_difference
 	time=$(date +%s)
-	time_difference=$(( time - LAST_TTIME[$metric_name] ))
+	time_difference=$(( time - LAST_TTIME["$metric_name"] ))
 
 	if [[ $time_difference -gt ${OPTIONS[COOLDOWN]} ]]; then
 		local msg
 		msg="$(date '+%H:%M:%S | %d.%m.%Y') WARNING ${metric_name} = ${CURRENT_VALUES[$metric_name]}${UNIT[$metric_name]} (threshold=${OPTIONS[$metric_name]}${UNIT[$metric_name]})"
-		echo_to_telegram "$msg"
+		if [[ $IS_TELEGRAM -eq 1 ]];then
+			echo_to_telegram "$msg"
+		fi
 		echo "$msg"
 		LAST_TTIME["$metric_name"]=$time
 	fi
@@ -153,7 +157,7 @@ function alert {
 
 
 # ============================================================
-# ВАЛИДАЦИЯ
+# VALIDATION
 # ============================================================
 
 function is_int {
@@ -181,23 +185,15 @@ function validate_fields {
 			continue
 		fi
 		if ! $foo_to_check "$current_tv" || ! in_range "$current_tv" "$min" "$max"; then
-			echo "Invalid Argument here ${field}" >&2
+			echo "invalid value for ${field} (see OPTIONS in metrics_conf.sh)" >&2
 			result=1
 		fi
 	done
 	return $result
 }
 
-# ============================================================
-# --once ОТЧЁТ
-# ============================================================
-
-
-
-
 function cleanup {
-	
-	echo "Exiting script...."
+	echo "Exiting script..."
 	case "$1" in
 		SIGHUP) exit 129 ;;
 		SIGINT) exit 130 ;;
@@ -206,18 +202,10 @@ function cleanup {
 	esac
 }
 
-# ============================================================
-# MAIN
-# ============================================================
-
 function main {
 	trap 'cleanup SIGTERM' SIGTERM
 	trap 'cleanup SIGINT' SIGINT
 	trap 'cleanup SIGHUP' SIGHUP
-
-
-# Токен обязательно должен быть частью URL-адреса!
-
 
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
@@ -234,31 +222,33 @@ function main {
 				IS_ONCE=1
 				shift 1
 				;;
+			-t|--telegram)
+				IS_TELEGRAM=1
+				shift 1
+				;;
 			*)
-				echo "Invalid argument $1" >&2
-				echo "here"
+				echo "invalid argument: $1" >&2
 				exit 1
 				;;
 		esac
 	done
 
-
-OPTIONS[TICKS]=$(getconf CLK_TCK)
-if grep -q '^amneziawg' /proc/modules; then
-    OPTIONS["MODE"]="kernel"
-elif OPTIONS["PID"]=$(pgrep -o "amnezia") && [ -n "${OPTIONS["PID"]}" ]; then
-    OPTIONS["MODE"]="userspace"
-    METRICS+=("${AWG_METRICS[@]}")
-    for key in "${!AWG_METRICS_FORMAT[@]}"; do
-        FORMAT[$key]=${AWG_METRICS_FORMAT["$key"]}
-    done
-else
-    echo "U dont have VPN PROCESS working" >&2
-    exit 1
-fi
+	OPTIONS[TICKS]=$(getconf CLK_TCK)
+	if grep -q '^amneziawg' /proc/modules; then
+		OPTIONS["MODE"]="kernel"
+	elif OPTIONS["PID"]=$(pgrep -o "amnezia") && [ -n "${OPTIONS["PID"]}" ]; then
+		OPTIONS["MODE"]="userspace"
+		METRICS+=("${AWG_METRICS[@]}")
+		for key in "${!AWG_METRICS_FORMAT[@]}"; do
+			FORMAT["$key"]=${AWG_METRICS_FORMAT["$key"]}
+		done
+	else
+		echo "no AmneziaWG VPN process found (and the amneziawg kernel module is not loaded)" >&2
+		exit 1
+	fi
 
 	if [[ -z ${OPTIONS["VPN_INT"]} ]]; then
-		echo "U didnt enter you vpn interface to listen"
+		echo "no VPN interface given, use: -vi <iface>" >&2
 		exit 1
 	fi
 	if ! validate_fields; then

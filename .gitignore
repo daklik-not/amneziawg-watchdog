@@ -1,0 +1,13 @@
+# Secrets — never commit
+.env
+*.env
+
+# Editor / OS junk
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local runtime artifacts
+*.log

@@ -1,5 +1,6 @@
 #!/bin/bash
 source ./metrics_conf.sh
+
 function get_PROC_COUNT_inf {
 	local process_count
 	process_count=$(ps -ef | wc -l)
@@ -10,12 +11,6 @@ function get_PROC_ZOMBI_COUNT_inf {
 	local current_value
 	current_value=$(awk '{print $10}' < <(top -bn1 | grep zombie))
 	CURRENT_VALUES["PROC_ZOMBI_COUNT"]=$current_value
-}
-
-function get_FD_USED_inf { # не буду добавлять в метрику поскольку оно просто не будует работать без запущенной амнезии
-    local open_d 
-    read -r open_d _ _ < /proc/sys/fs/file-nr
-    CURRENT_VALUES["FD_USED"]=$open_d
 }
 
 function get_PROC_BLOCKED_inf {
@@ -36,7 +31,7 @@ function get_PROC_TOTAL {
 function get_FORKS_PER_SEC_inf {
 	local current_t delta_t time
 	time=${OPTIONS["UPDATE_TIME"]}
-	current_t=$(awk -v t="$time" '/processes/  {print $2 / t}' /proc/stat) # делим на время с которым запускается скрипт
+	current_t=$(awk '/processes/ {print $2}' /proc/stat) # cumulative fork count since boot
 	get_TIME_BASED_METRICS "$current_t" "FORKS_PER_SEC" "delta_t" "$time" || return $?
 	CURRENT_VALUES["FORKS_PER_SEC"]=$delta_t
 }
@@ -45,13 +40,13 @@ function get_FORKS_PER_SEC_inf {
 
 function get_AWG_RSS_inf {
 	local current_RSS
-	current_RSS=$(awk '/VmRSS/ {print $2 }' /proc/${OPTIONS[PID]}/status )
+	current_RSS=$(awk '/VmRSS/ {print $2 }' "/proc/${OPTIONS[PID]}/status" )
 	CURRENT_VALUES["AWG_RSS"]=$current_RSS
 }
 
 function get_AWG_FD_COUNT_inf {
 	local current_fd
-	current_fd=$(ls /proc/${OPTIONS[PID]}/fd | wc -l)
+	current_fd=$(ls "/proc/${OPTIONS[PID]}/fd" | wc -l)
 	CURRENT_VALUES["AWG_FD_COUNT"]=$current_fd
 }
 
@@ -63,7 +58,7 @@ function get_AWG_FD_LIMIT_inf {
 	CURRENT_VALUES["AWG_FD_LIMIT"]=$current_val
 }
 
-function get_AWG_CPU_inf { # сколько тиков процесс сжевал за 1 секунду в процентах
+function get_AWG_CPU_inf { # how many ticks the process burned in one second, in percent
 
 	local current_st current_ut ticks delta_st delta_ut f_value 
 	ticks="${OPTIONS[TICKS]}"

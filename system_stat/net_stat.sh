@@ -1,7 +1,7 @@
 #!/bin/bash
 source ./metrics_conf.sh
 
-#это все серверный TCP -> то есть сервер сам куда-то обращается по TCP.
+# this is all server-side TCP -> i.e. the server itself connects somewhere over TCP.
 function SERV_TCP_GET_STAT {
     local -n out=$1
     local STATE ev_else
@@ -20,8 +20,8 @@ function get_SERV_TCP_STAT {
 
 function get_SERV_TCP_LISTEN_inf     { get_SERV_TCP_STAT "LISTEN"; }
 
-#не имеет смысла с использование conntrack, \
-#но можно раскоментить, чтобы смотреть именно сокеты, а не соединения
+# makes no sense when using conntrack, \
+# but you can uncomment it to look at sockets rather than connections
 
 #function get_SERV_TCP_SYN_SENT_inf   { get_SERV_TCP_STAT "SYN_SENT"; }
 #function get_SERV_TCP_SYN_RECV_inf   { get_SERV_TCP_STAT "SYN_RECV"; }
@@ -29,7 +29,7 @@ function get_SERV_TCP_LISTEN_inf     { get_SERV_TCP_STAT "LISTEN"; }
 #function get_SERV_TCP_TIME_WAIT_inf  { get_SERV_TCP_STAT "TIME_WAIT"; }
 #function get_SERV_TCP_CLOSE_WAIT_inf { get_SERV_TCP_STAT "CLOSE_WAIT"; }
 
-## проблема с тем, что я не знаю, какой предполагаемый линк speed,  поскольку на VPS его не пишут, а какие-то свои предположеения я просто не могу делаь
+## the problem is that I don't know the expected link speed, since it isn't reported on a VPS, and I simply can't make up assumptions of my own
 function NET_STAT {
     local current_value delta metric=$1 metric_name=$2
     current_value=$(awk -v m="$metric" -v i="${OPTIONS["VPN_INT"]}" '$1 ~ i ":" {print $m}' /proc/net/dev)
@@ -44,7 +44,7 @@ function get_NET_TR_DROPPED_inf  { NET_STAT 13 "TR_DROPPED" ;}
 
 
 
-# можно использовать для получения информации из файла snmp
+# can be used to read information from the snmp file
 function get_NET_SNMP { 
     local -n out=$1
     local -a metric_array metric_values
@@ -58,8 +58,8 @@ function get_NET_SNMP {
     done
 }
 
-# ФАКТИЧЕСКИ ТОЖЕ ТОЛЬКО ДЛЯ СОЕДИНЕНИЙ СЕРВЕРА
-# ЕСЛИ ЧЕКАЕМ НЕ ВПН СЕРВЕР, ТО ЕСТЬ СМЫСЛ ИНАЧЕ НЕТ
+# ACTUALLY THIS TOO IS ONLY FOR THE SERVER'S CONNECTIONS
+# IF WE ARE NOT MONITORING A VPN SERVER IT MAKES SENSE; OTHERWISE IT DOESN'T
 
 #function get_NET_SERV_TCP_RETRANS_inf {
 #    local -A local_net_stat 
@@ -80,7 +80,7 @@ function get_NET_SNMP {
 #    fi
 #    local current_value
 #    current_value=$(awk -v a="$delta_RS" -v b="$delta_OS" 'BEGIN {print (a / b) * 100}')
-#    CURRENT_VALUES[NET_SERV_TCP_RETRANS]=$current_value # здесь мне надо 2 дельты
+#    CURRENT_VALUES[NET_SERV_TCP_RETRANS]=$current_value # here I need two deltas
 #}
 
 #function get_NET_SERV_TCP_PASSIVE_OPENS_inf {
@@ -98,7 +98,7 @@ function get_NET_SNMP {
 #	get_TIME_BASED_METRICS "$current_value" "NET_SERV_TCP_LISTEN_OVERFLOWS" "delta" || return $?
 #	CURRENT_VALUES[NET_SERV_TCP_LISTEN_OVERFLOWS]=$delta
 #}
-##остановился вот здесь 
+## stopped here 
 
 
 function get_NET_SOCKET_COUNT_inf {
@@ -108,8 +108,8 @@ function get_NET_SOCKET_COUNT_inf {
 }
 
 
-# UDP МЕТРИКИ
-# ВСЕ UDP МЕТРИКИ ОБЩИЕ, ПОЭТОМУ СМЫСЛ ЕСТЬ
+# UDP METRICS
+# ALL UDP METRICS ARE SYSTEM-WIDE, SO THEY MAKE SENSE
 
 function get_UDP_RCVBUF_ERR_inf {  get_UDP_METRIC_inf  "RcvbufErrors" "UDP_RCVBUF_ERR"; }
 function get_UDP_SNDBUF_ERR_inf {  get_UDP_METRIC_inf  "SndbufErrors" "UDP_SNDBUF_ERR"; }
@@ -124,9 +124,9 @@ function get_UDP_METRIC_inf {
 	CURRENT_VALUES["$2"]=$delta_ER
 }
 
-########################## КЛИЕНТСКИЙ TCP ##########################
-# Чтобы отслеживать клиентские TCP соединения
-#надо смотреть на соединения внутри UDP сокета
+########################## CLIENT TCP ##########################
+# To track client TCP connections
+# you have to look at the connections inside the UDP socket
 function get_CLIENT_TCP_ESTABL_inf {
     local current_e
     current_e=$(conntrack -L -p tcp --state ESTABLISHED 2>/dev/null | wc -l)

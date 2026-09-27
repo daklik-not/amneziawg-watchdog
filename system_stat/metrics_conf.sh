@@ -2,50 +2,45 @@
 
 INF=100000000000
 
-# ВНИМАНИЕ: раньше тут были захардкожены реальные BOT_TOKEN/CHAT_ID — этот секрет уже засвечен
-# (в истории редактирования и в переписке), его стоит отозвать/пересоздать через @BotFather.
-# Теперь токен и chat_id читаются из окружения — прокидывайте их через
-# `-e BOT_TOKEN=... -e CHAT_ID=...` в docker run (rebuild.sh), а не храните в самом файле.
 BOT_TOKEN="${BOT_TOKEN:-}"
 CHAT_ID="${CHAT_ID:-}"
 
-declare -A LAST_TTIME # время последнего алерта по метрике (для cooldown)
+declare -A LAST_TTIME # time of the last alert for this metric (used for cooldown)
 
 declare METRICS=(
-	CPU_LOAD5         # Средняя загрузка за 5 мин — сглаженный индикатор, есть ли очередь на CPU. Растёт быстрее, чем CPU_UTIL реагирует, и учитывает процессы в D-state (I/O wait)
-	MEM_USED_PCT      # % использованной RAM — прямой предиктор OOM. Для прокси критично: при нехватке памяти ядро начнёт убивать процессы, включая сам прокси
-	SWAP_USED_PCT     # % использованного swap — если swap активно растёт, машина уже под давлением. При свопе latency прокси улетает в космос, т.к. страницы читаются с диска
-	MEM_OOM_COUNT     # Счётчик срабатываний OOM-killer — counter, важен rate. Один тик = кто-то умер; если это прокси, клиенты уже получили 502. Самый жёсткий memory-алерт
-	CPU_CTXT          # Переключений контекста — counter, важен rate/sec. Аномально высокий = thrashing scheduler'а (много коротких процессов/потоков), растёт latency
-	DISK_ROOT_PCT     # % занятого места на /. Диск в 100% роняет логи, сокеты-файлы, PID-файлы — прокси не сможет писать, а под нагрузкой и принимать коннекты
-	DISK_INODE_PCT    # % использованных inode на /. Inode кончаются раньше места при миллионах мелких файлов (логи, кеш, сессии). Прокси теряет возможность создавать сокеты/логи, хотя df показывает свободное место
-	DISK_IO_UTIL_PCT  # % времени, когда диск был занят хоть одной операцией. Counter-based (io_ticks из /proc/diskstats). При 100% — очередь растёт, latency улетает, iowait шумит. Прямой индикатор «диск — узкое место»
-	PROC_COUNT        # Общее число процессов. Резкий рост = fork-бомба, утечка воркеров, зомби-накопление. Стабильный рост — медленный утечка-баг в приложении
-	PROC_ZOMBI_COUNT  # Число зомби-процессов. Рост = родительский процесс не делает wait() за детьми — на маленькой системе с 1GB RAM это быстро съедает таблицу процессов/PID
-	PROC_BLOCKED      # Процессы в состоянии D (uninterruptible sleep, обычно диск/сеть-storage). Устойчивый рост = диск/сеть не успевает отвечать, процессы «зависают»
-	PROC_TOTAL_THREADS   # Суммарное число тредов в системе (из /proc/loadavg). На маленькой машине рост треда-каунта = утечка потоков/воркеров, съедающая и так дефицитную RAM
-	PROC_RUNNING_THREADS # Число тредов в состоянии running/runnable прямо сейчас (из /proc/loadavg). При 1 vCPU это фактически очередь на единственное ядро
-	FORKS_PER_SEC     # Число fork() в секунду — counter, важен rate. Резкий скачок = fork-бомба или патологическое поведение сервиса (respawn-loop).                # ВАЖНО: сам этот скрипт форкает много subprocess'ов (ps/ss/df/awk/conntrack) каждую итерацию — учитывайте это в baseline, порог ниже уже подобран с запасом на самонагрузку
-	FD_USED           # Использовано файловых дескрипторов системой (/proc/sys/fs/file-nr, kernel-режим, общесистемно). Приближение к fs.file-max = EMFILE, отказы новых соединений
-	CPU_UTIL          # Суммарная загрузка CPU в % — общий индикатор «дыхания» системы. Именно её обычно смотрят первым при деградации
-	CPU_STEAL         # Время, украденное гипервизором — на VPS показывает шумных соседей. Если >5–10%, твоя машина тормозит не из-за твоего кода, и тюнить локально бесполезно
-	CPU_SOFTIRQ       # Обработка softirq (в основном сеть, NET_RX/TX). Для прокси — прямой индикатор: если softirq высокий, ядро не успевает обрабатывать пакеты, растут drops и retrans
-	CPU_SYSTEM        # Время в kernel space. Растёт при syscall-штормах, высоком network I/O, мьютексах. Для прокси часто важнее user time — узкое место в ядре, а не в коде
-	CPU_IOWAIT        # % времени CPU в ожидании завершения I/O. На 1 vCPU это напрямую "съедает" единственное ядро — высокий iowait = диск тормозит весь процесс, а не только его собственный I/O
-	SERV_TCP_LISTEN   # Сокеты в LISTEN — сколько портов/бэкендов слушается. conntrack не видит LISTEN, поэтому берём из ss. Если число внезапно упало — кто-то из воркеров отвалился и не переподнялся
-	NET_RX_BYTES      # Принято байт по сети — counter, важен rate. Показывает входящий трафик; резкий рост/падение помогает понять, идёт ли нагрузка вообще
-	NET_TR_BYTES      # Передано байт по сети — counter, важен rate. Показывает исходящий трафик; вместе с NET_RX_BYTES даёт картину сетевой активности
-	NET_RX_DROPPED    # Входящие пакеты, отброшенные ядром — counter, важен rate. Растёт при переполнении буферов/очередей NIC: пакеты не доходят до прокси, клиенты видят таймауты
-	NET_TR_DROPPED    # Исходящие пакеты, отброшенные ядром — counter, важен rate. Растёт при переполнении TX-очередей: ответы не уходят, соединения зависают в retrans
-	CLIENT_TCP_ESTABL     # Число TCP-соединений в ESTABLISHED в conntrack — включая транзит клиентов VPN и локальные соединения сервера. Главная метрика нагрузки
-	CLIENT_TCP_USED       # % заполнения таблицы conntrack (nf_conntrack_count / nf_conntrack_max). Приближение к 100% = новые соединения начнут дропаться
-	CLIENT_TCP_DROP       # Counter пакетов, отброшенных conntrack из-за переполнения таблицы. Rate > 0 = клиенты уже теряют соединения
-	CLIENT_TCP_TIME_WAIT  # TCP-соединения в TIME_WAIT в conntrack. Накопление = много коротких соединений через сервер
-	CLIENT_TCP_CLOSE_WAIT # TCP-соединения в CLOSE_WAIT в conntrack. Устойчивый рост = FD-leak
-	NET_SOCKET_COUNT  # Всего сокетов в системе (TCP+UDP+UNIX). Резкий рост = утечка сокетов, приближение к fs.file-max. Ключевой индикатор исчерпания FD
-	UDP_RCVBUF_ERR    # Пакеты, отброшенные ядром: буфер приёма UDP-сокета полон — counter, важен rate. Для VPN с играми/видео — прямой индикатор потерь внутри туннеля
-	UDP_SNDBUF_ERR    # Пакеты, отброшенные ядром: буфер отправки UDP-сокета полон — counter, важен rate. Аналогично RCVBUF, но на исходящем направлении
-	UDP_IN_ERRORS     # Ошибки входящих UDP-пакетов (кроме checksum) — counter, важен rate. Битые пакеты, проблемы на L2/L3, редко, но полезно при диагностике
+	CPU_LOAD5         # 5-minute load average — a smoothed indicator of whether there is a CPU queue. Grows faster than CPU_UTIL reacts and accounts for processes in D-state (I/O wait)
+	MEM_USED_PCT      # % of RAM used — a direct OOM predictor. Critical for a proxy: when memory runs low the kernel starts killing processes, including the proxy itself
+	SWAP_USED_PCT     # % of swap used — if swap keeps growing the machine is already under pressure. When swapping, proxy latency goes through the roof because pages are read from disk
+	MEM_OOM_COUNT     # OOM-killer invocation counter — a counter, the rate matters. One tick = someone died; if it was the proxy, clients already got a 502. The harshest memory alert
+	CPU_CTXT          # Context switches — a counter, rate/sec matters. Abnormally high = scheduler thrashing (many short-lived processes/threads), latency grows
+	DISK_ROOT_PCT     # % of space used on /. A disk at 100% breaks logs, socket files, PID files — the proxy won't be able to write, and under load won't accept connections either
+	DISK_INODE_PCT    # % of inodes used on /. Inodes run out before space does with millions of small files (logs, cache, sessions). The proxy loses the ability to create sockets/logs even though df reports free space
+	DISK_IO_UTIL_PCT  # % of time the disk was busy with at least one operation. Counter-based (io_ticks from /proc/diskstats). At 100% the queue grows, latency skyrockets, iowait gets noisy. A direct indicator that the disk is the bottleneck
+	PROC_COUNT        # Total number of processes. A sharp rise = fork bomb, worker leak, zombie accumulation. Steady growth = a slow leak bug in the application
+	PROC_ZOMBI_COUNT  # Number of zombie processes. Growth = the parent process isn't calling wait() for its children — on a small system with 1 GB RAM this quickly eats up the process/PID table
+	PROC_BLOCKED      # Processes in state D (uninterruptible sleep, usually disk/network storage). Sustained growth = disk/network can't keep up, processes hang
+	PROC_TOTAL_THREADS   # Total number of threads in the system (from /proc/loadavg). On a small machine a growing thread count = a thread/worker leak eating up the already scarce RAM
+	PROC_RUNNING_THREADS # Number of threads in the running/runnable state right now (from /proc/loadavg). With 1 vCPU this is effectively the queue for the single core
+	FORKS_PER_SEC     # Number of fork() calls per second — a counter, the rate matters. A sharp jump = fork bomb or pathological service behavior (respawn loop).                # IMPORTANT: this script itself forks many subprocesses (ps/ss/df/awk/conntrack) on every iteration — account for that in the baseline; the threshold below already has headroom for this self-load
+	CPU_UTIL          # Total CPU utilization in % — a general indicator of how the system breathes. It is usually the first thing people look at during degradation
+	CPU_STEAL         # Time stolen by the hypervisor — on a VPS it reveals noisy neighbors. If >5–10% your machine is slow not because of your code, and tuning locally is pointless
+	CPU_SOFTIRQ       # softirq handling (mostly network, NET_RX/TX). For a proxy it is a direct indicator: if softirq is high the kernel can't keep up with packet processing, drops and retransmissions grow
+	CPU_SYSTEM        # Time in kernel space. Grows with syscall storms, high network I/O, mutexes. For a proxy it is often more important than user time — the bottleneck is in the kernel, not in the code
+	CPU_IOWAIT        # % of CPU time spent waiting for I/O to complete. With 1 vCPU this directly "eats" the single core — high iowait = the disk stalls the whole process, not just its own I/O
+	SERV_TCP_LISTEN   # Sockets in LISTEN — how many ports/backends are being listened on. conntrack doesn't see LISTEN, so we take it from ss. If the number suddenly drops — one of the workers died and didn't come back up
+	NET_RX_BYTES      # Bytes received over the network — a counter, the rate matters. Shows inbound traffic; a sharp rise/fall helps you understand whether load is flowing at all
+	NET_TR_BYTES      # Bytes transmitted over the network — a counter, the rate matters. Shows outbound traffic; together with NET_RX_BYTES it gives a picture of network activity
+	NET_RX_DROPPED    # Inbound packets dropped by the kernel — a counter, the rate matters. Grows when NIC buffers/queues overflow: packets don't reach the proxy, clients see timeouts
+	NET_TR_DROPPED    # Outbound packets dropped by the kernel — a counter, the rate matters. Grows when TX queues overflow: replies don't leave, connections hang in retransmission
+	CLIENT_TCP_ESTABL     # Number of TCP connections in ESTABLISHED in conntrack — including the transit traffic of VPN clients and the server's local connections. The main load metric
+	CLIENT_TCP_USED       # % fill of the conntrack table (nf_conntrack_count / nf_conntrack_max). Approaching 100% = new connections will start being dropped
+	CLIENT_TCP_DROP       # Counter of packets dropped by conntrack due to table overflow. Rate > 0 = clients are already losing connections
+	CLIENT_TCP_TIME_WAIT  # TCP connections in TIME_WAIT in conntrack. Accumulation = many short-lived connections going through the server
+	CLIENT_TCP_CLOSE_WAIT # TCP connections in CLOSE_WAIT in conntrack. Sustained growth = FD leak
+	NET_SOCKET_COUNT  # Total sockets in the system (TCP+UDP+UNIX). A sharp rise = socket leak, approaching fs.file-max. A key indicator of FD exhaustion
+	UDP_RCVBUF_ERR    # Packets dropped by the kernel: the UDP socket receive buffer is full — a counter, the rate matters. For a VPN carrying games/video it is a direct indicator of losses inside the tunnel
+	UDP_SNDBUF_ERR    # Packets dropped by the kernel: the UDP socket send buffer is full — a counter, the rate matters. Same as RCVBUF but in the outbound direction
+	UDP_IN_ERRORS     # Inbound UDP packet errors (other than checksum) — a counter, the rate matters. Corrupted packets, L2/L3 problems; rare, but useful for diagnostics
 )
 
 declare AWG_METRICS=(
@@ -54,7 +49,7 @@ declare AWG_METRICS=(
 	AWG_FD_LIMIT
 	AWG_CPU
 	AWG_THREAD
-	#AWG_RESTARTS
+	AWG_RESTARTS
 )
 
 declare -A AWG_METRICS_FORMAT=(
@@ -63,66 +58,57 @@ declare -A AWG_METRICS_FORMAT=(
 	[AWG_FD_LIMIT]="float"
 	[AWG_CPU]="float"
 	[AWG_THREAD]="int"
-	#[AWG_RESTARTS]="int"
+	[AWG_RESTARTS]="int"
 )
 
 IS_ONCE=0
+IS_TELEGRAM=0
+# Alert thresholds + runtime options.
+# An alert fires when the metric value >= its threshold; the values below are
+# example defaults for the 1 vCPU / 1 GB target host - tune them for yours.
 
-# TODO: PATH_TO_CONFIG_FILE и весь --config механизм в system_stat.sh — мёртвый код после перехода
-# на прямое редактирование этого файла. Выпилить вместе с apply_config_from_file при следующей чистке.
-PATH_TO_CONFIG_FILE=""
-
-# ============================================================
-# ПОРОГИ ПОДОБРАНЫ ПОД: 1 vCPU / 1 GB RAM / 10 GB Disk (небольшой VPN-прокси на Amnezia).
-# Для NET_RX_BYTES / NET_TR_BYTES реальная пропускная способность канала неизвестна —
-# взято консервативное допущение ~80 Мбит/с (10 МБ/с); подставьте свой реальный лимит канала.
-# Для counter-метрик, которые в норме равны 0 (drops/errors/oom), порог сознательно НЕ 0,
-# а >=1 — иначе из-за сравнения "value >= threshold" алерт будет срабатывать постоянно.
-# ============================================================
 declare -A OPTIONS=(
-	[NET_RX_BYTES]=10000000
-	[NET_TR_BYTES]=10000000
+	[NET_RX_BYTES]=125000000
+	[NET_TR_BYTES]=125000000
 	[NET_RX_DROPPED]=1
 	[NET_TR_DROPPED]=1
 	[VPN_INT]=""
-	[CPU_LOAD5]=1.5
-	[MEM_USED_PCT]=85
+	[CPU_LOAD5]=2
+	[MEM_USED_PCT]=90
 	[SWAP_USED_PCT]=50
-	[SWAP_USED_BYTES]=0
 	[MEM_OOM_COUNT]=1
-	[DISK_ROOT_PCT]=85
-	[DISK_INODE_PCT]=85
-	[DISK_IO_UTIL_PCT]=80
-	[PROC_COUNT]=300
-	[PROC_ZOMBI_COUNT]=5
-	[PROC_BLOCKED]=3
-	[PROC_TOTAL_THREADS]=500
-	[PROC_RUNNING_THREADS]=4
-	[FORKS_PER_SEC]=300  # восстановлено с 50: см. комментарий у метрики выше — 50 ловит собственную форк-нагрузку скрипта, а не реальные аномалии
-	[FD_USED]=50000
-	[UPDATE_TIME]=5
-	[COOLDOWN]=300  # восстановлено с 6: при UPDATE_TIME=5 и COOLDOWN=6 алерт будет дублироваться почти каждую итерацию — если это осознанный выбор, верните 6 обратно
+	[DISK_ROOT_PCT]=90
+	[DISK_INODE_PCT]=90
+	[DISK_IO_UTIL_PCT]=90
+	[PROC_COUNT]=1000
+	[PROC_ZOMBI_COUNT]=1
+	[PROC_BLOCKED]=5
+	[PROC_TOTAL_THREADS]=2000
+	[PROC_RUNNING_THREADS]=16
+	[FORKS_PER_SEC]=1000
+	[UPDATE_TIME]=60
+	[COOLDOWN]=300
 	[CPU_UTIL]=90
 	[CPU_IOWAIT]=20
 	[CPU_STEAL]=10
-	[CPU_SYSTEM]=40
-	[CPU_SOFTIRQ]=30
-	[CPU_CTXT]=20000
-	[SERV_TCP_LISTEN]=20
-	[CLIENT_TCP_ESTABL]=2000
+	[CPU_SYSTEM]=80
+	[CPU_SOFTIRQ]=50
+	[CPU_CTXT]=100000
+	[SERV_TCP_LISTEN]=1000
+	[CLIENT_TCP_ESTABL]=50000
 	[CLIENT_TCP_USED]=80
 	[CLIENT_TCP_DROP]=1
-	[CLIENT_TCP_TIME_WAIT]=1000
-	[CLIENT_TCP_CLOSE_WAIT]=50
-	[NET_SOCKET_COUNT]=5000
+	[CLIENT_TCP_TIME_WAIT]=50000
+	[CLIENT_TCP_CLOSE_WAIT]=500
+	[NET_SOCKET_COUNT]=50000
 	[UDP_RCVBUF_ERR]=1
 	[UDP_SNDBUF_ERR]=1
 	[UDP_IN_ERRORS]=1
-	[AWG_RSS]=150000
-	[AWG_FD_COUNT]=500
-	[AWG_FD_LIMIT]=80
-	[AWG_CPU]=80
-	[AWG_THREAD]=50
+	[AWG_RSS]=200000
+	[AWG_FD_COUNT]=10000
+	[AWG_FD_LIMIT]=90
+	[AWG_CPU]=90
+	[AWG_THREAD]=500
 	[AWG_RESTARTS]=1
 )
 
@@ -141,7 +127,6 @@ declare -A FORMAT=(
 	[CPU_LOAD5]="float"
 	[MEM_USED_PCT]="int"
 	[SWAP_USED_PCT]="float"
-	[SWAP_USED_BYTES]="int"
 	[MEM_OOM_COUNT]="int"
 	[DISK_ROOT_PCT]="int"
 	[DISK_INODE_PCT]="int"
@@ -152,7 +137,6 @@ declare -A FORMAT=(
 	[PROC_TOTAL_THREADS]="int"
 	[PROC_RUNNING_THREADS]="int"
 	[FORKS_PER_SEC]="float"
-	[FD_USED]="int"
 	[UPDATE_TIME]="int"
 	[COOLDOWN]="int"
 	[CPU_UTIL]="float"
@@ -181,7 +165,6 @@ declare -A MIN=(
 	[CPU_LOAD5]=0
 	[MEM_USED_PCT]=0
 	[SWAP_USED_PCT]=0
-	[SWAP_USED_BYTES]=0
 	[MEM_OOM_COUNT]=0
 	[DISK_ROOT_PCT]=0
 	[DISK_INODE_PCT]=0
@@ -192,7 +175,6 @@ declare -A MIN=(
 	[PROC_TOTAL_THREADS]=0
 	[PROC_RUNNING_THREADS]=0
 	[FORKS_PER_SEC]=0
-	[FD_USED]=0
 	[UPDATE_TIME]=1
 	[COOLDOWN]=0
 	[CPU_UTIL]=0
@@ -227,7 +209,6 @@ declare -A MAX=(
 	[CPU_LOAD5]=$INF
 	[MEM_USED_PCT]=100
 	[SWAP_USED_PCT]=100
-	[SWAP_USED_BYTES]=$INF
 	[MEM_OOM_COUNT]=$INF
 	[DISK_ROOT_PCT]=100
 	[DISK_INODE_PCT]=100
@@ -238,7 +219,6 @@ declare -A MAX=(
 	[PROC_TOTAL_THREADS]=$INF
 	[PROC_RUNNING_THREADS]=$INF
 	[FORKS_PER_SEC]=$INF
-	[FD_USED]=$INF
 	[UPDATE_TIME]=$INF
 	[COOLDOWN]=$INF
 	[CPU_UTIL]=100
@@ -265,7 +245,7 @@ declare -A MAX=(
 	[AWG_RESTARTS]=$INF
 )
 
-# Единицы измерения — только для форматирования вывода (once, alert), не участвуют в валидации
+# Units — used only for output formatting (once, alert); they do not participate in validation
 declare -A UNIT=(
 	[NET_RX_BYTES]="B"
 	[NET_TR_BYTES]="B"
@@ -274,7 +254,6 @@ declare -A UNIT=(
 	[CPU_LOAD5]=""
 	[MEM_USED_PCT]="%"
 	[SWAP_USED_PCT]="%"
-	[SWAP_USED_BYTES]="B"
 	[MEM_OOM_COUNT]=""
 	[DISK_ROOT_PCT]="%"
 	[DISK_INODE_PCT]="%"
@@ -285,7 +264,6 @@ declare -A UNIT=(
 	[PROC_TOTAL_THREADS]=""
 	[PROC_RUNNING_THREADS]=""
 	[FORKS_PER_SEC]=""
-	[FD_USED]=""
 	[UPDATE_TIME]="s"
 	[COOLDOWN]="s"
 	[CPU_UTIL]="%"

@@ -13,7 +13,7 @@ RUN apk add --no-cache \
 
 WORKDIR /opt/system_stat
 
-# Копируем папку system_stat/ с хоста в WORKDIR контейнера
+# Copy the system_stat/ folder from the host into the container WORKDIR
 COPY system_stat/ /opt/system_stat/
 
 RUN chmod +x /opt/system_stat/system_stat.sh

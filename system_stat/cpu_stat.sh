@@ -1,7 +1,7 @@
 #!/bin/bash
 source ./metrics_conf.sh
 
-function get_CPU_LOAD { # /proc/loadvg file
+function get_CPU_LOAD { # /proc/loadavg file
 	local -a loadavg
 	if ! read -r -a loadavg < /proc/loadavg; then
 		echo "can't read /proc/loadavg" >&2
@@ -36,7 +36,7 @@ function get_CPU_STAT {
     get_TIME_BASED_METRICS  "$current_submetric" "CPU_${submetric}" "rsubmetric" || rc2=$?
     (( rc1 || rc2 )) && return 1
 
-    if (( rtotal <= 0 )); then echo "Zero division attemption" >&2; return 1; fi
+    if (( rtotal <= 0 )); then echo "zero division while computing CPU stats" >&2; return 1; fi
     
     CURRENT_VALUES["CPU_$submetric"]=$(awk -v t="$rtotal" -v i="$rsubmetric" 'BEGIN { printf "%.2f", i/t*100 }')
 }
@@ -48,15 +48,16 @@ function get_CPU_SYSTEM_inf { get_CPU_STAT "SYSTEM"; }
 function get_CPU_SOFTIRQ_inf { get_CPU_STAT "SOFTIRQ"; }
 
 function get_CPU_CTXT_inf {
-	local current_ctxt=$(awk '/^ctxt/ { print $2; exit }' /proc/stat)
+	local current_ctxt prev delta rate
+	current_ctxt=$(awk '/^ctxt/ { print $2; exit }' /proc/stat)
 	if [[ -z ${PREVIOUS_VALUES["CPU_CTXT"]} ]]; then
 		PREVIOUS_VALUES["CPU_CTXT"]=$current_ctxt
 		echo "No data for calculate CPU_CTXT" >&2
 		return 1
 	fi
-	local prev=${PREVIOUS_VALUES[CPU_CTXT]}
-	local delta=$(( current_ctxt - prev ))
-	local rate=$(awk -v d="$delta" -v t="${OPTIONS[UPDATE_TIME]}" 'BEGIN { printf "%.0f", d/t }')
+	prev=${PREVIOUS_VALUES[CPU_CTXT]}
+	delta=$(( current_ctxt - prev ))
+	rate=$(awk -v d="$delta" -v t="${OPTIONS[UPDATE_TIME]}" 'BEGIN { printf "%.0f", d/t }')
 	PREVIOUS_VALUES[CPU_CTXT]="$current_ctxt"
     CURRENT_VALUES[CPU_CTXT]="$rate"
 }

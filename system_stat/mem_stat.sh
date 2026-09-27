@@ -2,7 +2,7 @@
 source ./metrics_conf.sh
 
 
-#БЛОК ПАМЯТИ
+# MEMORY BLOCK
 
 function parse_MEM_INFO {
 	local -n out=$1
@@ -31,7 +31,7 @@ function get_MEM_OOM_COUNT_inf {
 function get_SWAP_USED_PCT_inf {
 	local -A MEM_INFO
 	parse_MEM_INFO MEM_INFO
-	if [[ ${MEM_INFO[SwapTotal]} -eq 0 ]]; then #no_swap
+	if [[ ${MEM_INFO[SwapTotal]} -eq 0 ]]; then # no swap
 		CURRENT_VALUES["SWAP_USED_PCT"]=0
 		return 0
 	fi
