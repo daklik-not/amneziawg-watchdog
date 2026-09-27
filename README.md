@@ -117,9 +117,6 @@ system_stat/system_stat.sh -vi <iface> [--once] [-t|--telegram]
   BOT_TOKEN=123456:ABC CHAT_ID=987654321 ./rebuild.sh -vi amn0
   ```
 
-> Keep real secrets out of git. If `BOT_TOKEN`/`CHAT_ID` are unset the script still runs,
-> but alerts are not delivered (a warning is printed).
-
 ## Adding a new metric
 
 A metric is wired in **two places only**: a getter function, and its entry in
@@ -190,6 +187,3 @@ That's it — the loop picks it up automatically. If the getter returns non-zero
   and mounts the host root read-only (`-v /:/host:ro`). It therefore needs
   root/docker access on the host.
 
-## License
-
-_(add your license here)_
