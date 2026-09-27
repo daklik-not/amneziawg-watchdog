@@ -1,4 +1,4 @@
-# system_stat
+# amneziawg-watchdog
 
 Lightweight system-metrics collector with **Telegram alerting**, packaged as a Docker
 container. It was built for a small **AmneziaWG** (WireGuard-based) VPN/proxy host
